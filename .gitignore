@@ -12,6 +12,7 @@ htmlcov/
 
 # Banco gerado pelo pipeline (uv run python -m pipeline.ingestao ...)
 *.duckdb
+!brasileirao.duckdb
 *.duckdb.wal
 *.duckdb.bak
 
