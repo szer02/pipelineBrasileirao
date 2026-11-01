@@ -1,0 +1,30 @@
+# Ambiente e caches do Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Ferramentas
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Banco gerado pelo pipeline (uv run python -m pipeline.ingestao ...)
+*.duckdb
+*.duckdb.wal
+*.duckdb.bak
+
+# Streamlit: só o tema vai para o repositório
+.streamlit/secrets.toml
+
+# Claude Code: configuração local desta máquina
+.claude/
+CLAUDE.md
+
+# Sistema operacional e editores
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
