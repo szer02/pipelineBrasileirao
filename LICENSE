@@ -1,0 +1,17 @@
+Os dados em raw/ são o dataset "Campeonato Brasileiro de Futebol",
+publicado por Adão Duque no Kaggle e redistribuído aqui, comprimido, sem
+alteração de conteúdo.
+
+    Fonte:    https://www.kaggle.com/datasets/adaoduque/campeonato-brasileiro-de-futebol
+    Autoria:  Adão Duque (adaoduque)
+    Licença:  GNU General Public License, versão 2 (GPL-2.0)
+              https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+
+Em resumo, a licença permite copiar, modificar e redistribuir os dados,
+inclusive comercialmente, desde que a redistribuição mantenha o aviso de
+autoria e de licença e que trabalhos derivados sejam distribuídos sob a
+mesma GPL-2.0.
+
+O material didático deste repositório (README e documentação) segue a
+mesma licença, para manter a compatibilidade com a cláusula copyleft da
+GPL-2.0.
