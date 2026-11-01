@@ -56,6 +56,23 @@ As três camadas são schemas do mesmo arquivo `brasileirao.duckdb`.
 | Prata | `refined` | as mesmas quatro tabelas, com tipos e nomes em português | conversão que falha para tudo; nada vira nulo em silêncio |
 | Ouro | `marts` | 14 tabelas, uma por pergunta de negócio | cada tabela é um único SELECT num arquivo `.sql` |
 
+## O que é uma linha de cada tabela
+
+As quatro tabelas têm o mesmo nome e o mesmo número de linhas em `raw` e em
+`refined`: a transformação tipa e renomeia, não descarta.
+
+| Tabela | Uma linha é | Chave | Linhas |
+|---|---|---|---|
+| `partidas` | uma partida | `partida_id` | 9.165 |
+| `estatisticas` | um clube numa partida | `partida_id`, `clube` | 18.330 |
+| `gols` | um gol | sem chave: a linha inteira | 10.820 |
+| `cartoes` | um cartão | sem chave: a linha inteira | 20.953 |
+
+`gols`, `cartoes` e `estatisticas` apontam para `partidas` por `partida_id`.
+Juntar `partidas` com `gols` ou `cartoes` multiplica linhas: cada partida se
+repete uma vez por gol ou por cartão. Por isso nenhum mart soma placar depois
+desse JOIN.
+
 ## Estrutura do projeto
 
 ```
@@ -73,6 +90,7 @@ pipeline_brasileirao/
 ├── test/                        # um arquivo de teste por módulo
 ├── SDD/                         # specs de cada etapa
 ├── ui.py                        # abre o banco na interface web do DuckDB
+├── .mcp.json                    # servidor MCP do DuckDB (somente leitura)
 ├── pyproject.toml               # dependências, pytest e coverage
 └── LICENSE                      # licença dos dados
 ```
@@ -115,9 +133,27 @@ uv run python ui.py   # Ctrl+C para encerrar
 > pé, as etapas do pipeline falham com erro de lock. O painel não tem esse
 > problema: ele abre o banco só para leitura e fecha a conexão a cada leitura.
 
+> O `.mcp.json` configura um servidor MCP para consultar o banco por uma IA,
+> em somente leitura. Ele roda com `uvx`, que pode trazer um DuckDB mais
+> antigo que o do projeto e falhar ao abrir o arquivo ("database file with
+> version number 69"). Nesse caso, consulte pelo próprio projeto:
+> `uv run python -c "import duckdb; ..."` com `read_only=True`.
+
 Para adicionar um mart, crie `sql/marts/NN_nome.sql` com um único SELECT e
 rode `pipeline.marts` de novo. A tabela `marts.nome` é criada sem mudar
 nenhuma linha de Python.
+
+### O que esperar
+
+| Etapa | Saída |
+|---|---|
+| `pipeline.ingestao` | 4 tabelas em `raw`, 59.268 linhas |
+| `pipeline.transformacao` | 59.268 -> 59.268 linhas (0 duplicatas removidas) |
+| `pipeline.marts` | 14 marts, 4.662 linhas |
+| `pytest --cov` | 70 testes passando, 98% de cobertura |
+
+Rodar qualquer etapa duas vezes imprime exatamente a mesma coisa: cada
+tabela é recriada, nada acumula.
 
 ## Regras
 
@@ -138,14 +174,14 @@ nenhuma linha de Python.
 - Tipos declarados:
   - `data` vira DATE, com o formato `dd/mm/aaaa` declarado;
   - `arrecadacao` vira DECIMAL(10,2), porque é dinheiro;
-  - posse `'58%'` vira 58;
+  - posse `'58%'` vira 58, e `'None'` vira nulo, contado à parte na tela;
   - minuto `'90+5'` vira duas colunas, `minuto` 90 e `acrescimo` 5.
 - Cada valor passa por uma checagem de formato (regex) antes de converter. Um
   valor fora do formato para o pipeline e mostra tabela, coluna e exemplo,
   em vez de virar nulo.
 - Duplicata exata em `partidas` e `estatisticas` sai. Em `gols` e `cartoes`
-  a linha repetida fica, porque o mesmo atleta pode marcar duas vezes no
-  mesmo minuto.
+  a linha repetida fica, porque essas tabelas não têm chave e duas linhas
+  iguais podem ser dois eventos. Hoje são 0 repetidas.
 - Anomalias de negócio ficam como chegaram. Quem decide o que fazer com elas
   é o mart que responde a pergunta.
 - As quatro tabelas são gravadas numa única transação.
@@ -180,24 +216,24 @@ nenhuma linha de Python.
 | Gols nos acréscimos | faixas `45+` e `90+`, separadas das faixas do minuto 45 e 90 |
 | Cobertura do dado | gols por atleta desde 2014; cartões de 2014 a 2024; arrecadação só em 2025 |
 
-Os 14 marts e a pergunta que cada um responde:
+Os 14 marts, a pergunta que cada um responde e o que é uma linha:
 
-| Mart | Pergunta |
-|---|---|
-| 01 `gols_por_temporada` | Quantos gols saem por temporada? |
-| 02 `artilheiros` | Quem mais fez gols? |
-| 03 `mando_de_campo` | Jogar em casa ajuda? |
-| 04 `classificacao` | Qual a classificação de cada temporada? |
-| 05 `gols_por_partida` | Quantos gols costuma ter uma partida? |
-| 06 `aproveitamento_por_clube` | Qual o aproveitamento de cada clube em todas as temporadas que jogou? |
-| 07 `cartoes_por_posicao` | Que posição leva mais cartão? |
-| 08 `posse_e_resultado` | Quem fica mais com a bola vence mais? |
-| 09 `arrecadacao_pareto` | Que fração dos clubes faz 80% da arrecadação? |
-| 10 `partidas_por_dia_da_semana` | Em que dia da semana se joga, e em qual saem mais gols? |
-| 11 `titulos_por_clube` | Quem mais ganhou o Brasileirão? |
-| 12 `kpis` | Os números dos cartões do painel |
-| 13 `gols_por_minuto` | Em que momento do jogo saem os gols? |
-| 14 `artilheiros_por_clube` | Quem mais fez gols por cada clube? |
+| Mart | Pergunta | Uma linha é |
+|---|---|---|
+| 01 `gols_por_temporada` | Quantos gols saem por temporada? | uma temporada |
+| 02 `artilheiros` | Quem mais fez gols? | um atleta |
+| 03 `mando_de_campo` | Jogar em casa ajuda? | o campeonato inteiro |
+| 04 `classificacao` | Qual a classificação de cada temporada? | um clube numa temporada |
+| 05 `gols_por_partida` | Quantos gols costuma ter uma partida? | um total de gols na partida |
+| 06 `aproveitamento_por_clube` | Qual o aproveitamento de cada clube? | um clube |
+| 07 `cartoes_por_posicao` | Que posição leva mais cartão? | uma posição em campo |
+| 08 `posse_e_resultado` | Quem fica mais com a bola vence mais? | uma situação de posse |
+| 09 `arrecadacao_pareto` | Que fração dos clubes faz 80% da arrecadação? | um clube mandante |
+| 10 `partidas_por_dia_da_semana` | Em que dia se joga, e em qual saem mais gols? | um dia da semana |
+| 11 `titulos_por_clube` | Quem mais ganhou o Brasileirão? | um clube campeão |
+| 12 `kpis` | Os números dos cartões do painel | o campeonato inteiro |
+| 13 `gols_por_minuto` | Em que momento do jogo saem os gols? | uma faixa de 15 minutos |
+| 14 `artilheiros_por_clube` | Quem mais fez gols por cada clube? | um atleta num clube |
 
 O grão e as regras de cada mart estão nos comentários do topo do arquivo
 `.sql` correspondente.
@@ -223,6 +259,56 @@ Os testes seguem três princípios:
   nunca de um número medido no dado real.
 - **DuckDB de verdade, sem mock.** O nome de cada teste é a frase que ele
   prova, por exemplo `test_gol_contra_fica_fora_do_artilheiro`.
+
+O que os 98% **não** medem: coverage conta só linhas de Python. Os 14
+arquivos `.sql`, onde mora a regra de negócio, ficam fora dessa conta. Cinco
+deles têm teste de regra próprio, rodado sobre tabelas inventadas:
+
+- 01: jogo de fevereiro conta na temporada anterior;
+- 02: gol contra fica fora;
+- 04: pontos 3/1/0;
+- 13: gol aos 90+3 vai para a faixa `90+`;
+- 14: atleta com dois clubes tem duas linhas.
+
+Os outros nove são conferidos pelos totais que precisam bater entre marts:
+
+- 9.165 partidas nos marts 01, 05 e 10;
+- 18.330 jogos nos marts 04 e 06;
+- 23.474 gols nos marts 01 e 12.
+
+As linhas sem teste são os `if __name__ == "__main__"`, o ROLLBACK da
+transformação (as checagens barram todo dado ruim antes dele) e dois
+`raise` de segurança.
+
+## Onde a IA errou ou assumiu algo, e como descobri
+
+A IA participou de todas as etapas: escreveu o código a partir das specs e
+ajudou a escrever as specs e os 14 `.sql` dos marts. Cada entrega terminou
+com uma lista "o que assumi", e nada foi aceito sem conferência, quase
+sempre contando linhas antes e depois.
+
+| Etapa | O que aconteceu | Como descobri |
+|---|---|---|
+| Ingestão | O pandas, por padrão, transforma o texto `'None'` em nulo. As colunas de posse e de precisão de passe teriam perdido, sem aviso, a diferença entre "campo vazio" e `'None'`. A spec passou a exigir `keep_default_na=False`. | Analisando a raw antes de escrever a spec: contagem de `'None'` por coluna (1.550 na posse, 3.854 na precisão). |
+| Refined | Em vez de assumir, a IA perguntou o que fazer com os nulos de posse, o acréscimo, as linhas repetidas e a linha de total. | As respostas fecharam a conta: 9.212 nulos vindos da raw + 1.550 `'None'` = 10.762 nulos na refined. |
+| MCP | Ao propor a correção do MCP (o servidor não abria o banco por diferença de versão do DuckDB), a IA incluiu uma flag `--read-only` que pode não existir na versão atual e impediria o servidor de subir. | Revisando a proposta antes de aplicar: o servidor já é somente leitura por padrão. |
+| Executor de marts | A IA escreveu na docstring motivos para regras que a spec não justificava, e deixou sem tratamento um `.sql` que não seja UTF-8 (sai traceback em vez de mensagem clara). | Lendo a lista "o que assumi" (11 itens) e a docstring contra a spec. |
+| SQL dos marts | Escritos com a IA. Decisões dela que eu aceitei: temporada = `year(data - 2 meses)`, artilheiro agrupado pelo nome, punições do tribunal ignoradas, o valor `'Zagueira'` mantido como chegou. | Totais que precisam bater entre marts (9.165 partidas, 18.330 jogos, 23.474 gols, 23 títulos, um por temporada) e os 23 campeões comparados com a história. |
+| Grão | Para a página do clube, filtrar o mart 02 por clube mostraria 84 gols do Luciano pelo São Paulo. Os 84 somam quatro clubes; pelo São Paulo foram 62. Virou o mart 14, com grão atleta × clube. | Comparando os gols do mesmo atleta nos dois grãos. |
+| Painel | Para a busca do critério de aceite (`groupby`, `merge`...) voltar vazia, a IA reescreveu a docstring sem essas palavras. Não escondia cálculo, mas mostrou que buscar palavra prova pouco. | Uma busca mais larga (`.agg(`, `value_counts`, `.max(`...), que só achou "pivotar" na docstring. |
+| Painel | As cores e siglas dos 46 clubes vieram do conhecimento da IA, sem fonte oficial. | A própria IA apontou as menos seguras: Barueri, Grêmio Prudente e Ipatinga. |
+| Testes | Os 98% de cobertura não incluem os `.sql`, porque coverage mede só Python. | Lendo a tabela do coverage contra a lista de arquivos do projeto. |
+| Testes | A IA avisou que o projeto ainda não era um repositório git, então um critério de aceite (`git status`) não pôde ser conferido. | A própria entrega dela. |
+
+## Versionamento
+
+O projeto inteiro foi desenvolvido em um único dia, fora do git, e
+versionado no fim: um commit por etapa, na ordem em que foram feitas
+(configuração, dados de origem, ingestão, transformação, marts 01 a 11,
+marts 12 a 14, painel, testes e README). Cada spec de `SDD/` entrou no
+mesmo commit do código que ela gerou. Por isso as datas dos commits ficam
+a poucos minutos umas das outras: registram o momento do versionamento,
+não o do desenvolvimento.
 
 ## Origem e licença
 
