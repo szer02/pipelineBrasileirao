@@ -4,6 +4,8 @@ Pipeline de dados em Python sobre o Campeonato Brasileiro de Futebol, Série A
 de 2003 a 2025: do CSV bruto a um painel interativo, passando por três
 camadas num banco DuckDB.
 
+**Painel online:** [pipelinebrasileirao.streamlit.app](https://pipelinebrasileirao.streamlit.app/)
+
 ## Objetivo
 
 Projeto final da trilha de **Engenheiro de Dados Jr** da Pós em Engenharia de
@@ -95,7 +97,9 @@ pipeline_brasileirao/
 └── LICENSE                      # licença dos dados
 ```
 
-O arquivo `brasileirao.duckdb` é gerado pelo pipeline e fica na raiz.
+O arquivo `brasileirao.duckdb` é gerado pelo pipeline e fica na raiz. Ele é
+versionado porque o painel online só lê o que está no repositório: depois de
+rodar o pipeline, faça commit do banco atualizado.
 
 ## Como usar
 
