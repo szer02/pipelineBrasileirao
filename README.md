@@ -302,7 +302,7 @@ sempre contando linhas antes e depois.
 | Painel | Para a busca do critério de aceite (`groupby`, `merge`...) voltar vazia, a IA reescreveu a docstring sem essas palavras. Não escondia cálculo, mas mostrou que buscar palavra prova pouco. | Uma busca mais larga (`.agg(`, `value_counts`, `.max(`...), que só achou "pivotar" na docstring. |
 | Painel | As cores e siglas dos 46 clubes vieram do conhecimento da IA, sem fonte oficial. | A própria IA apontou as menos seguras: Barueri, Grêmio Prudente e Ipatinga. |
 | Testes | Os 98% de cobertura não incluem os `.sql`, porque coverage mede só Python. | Lendo a tabela do coverage contra a lista de arquivos do projeto. |
-| Testes | A IA avisou que o projeto ainda não era um repositório git, então um critério de aceite (`git status`) não pôde ser conferido. | A própria entrega dela. |
+
 
 ## Versionamento
 
