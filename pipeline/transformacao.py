@@ -250,8 +250,10 @@ def _expressoes(origem: str, destino: str, tipo: str) -> list[tuple[str, str]]:
         return [
             (
                 destino,
-                f"CASE WHEN {c} = 'None' THEN NULL "
-                f"ELSE CAST(rtrim({c}, '%') AS INTEGER) END",
+                (
+                    f"CASE WHEN {c} = 'None' THEN NULL "
+                    f"ELSE CAST(rtrim({c}, '%') AS INTEGER) END"
+                ),
             )
         ]
     if tipo == MINUTO:
@@ -259,8 +261,10 @@ def _expressoes(origem: str, destino: str, tipo: str) -> list[tuple[str, str]]:
             (destino, f"CAST(split_part({c}, '+', 1) AS INTEGER)"),
             (
                 "acrescimo",
-                f"CASE WHEN {c} LIKE '%+%' "
-                f"THEN CAST(split_part({c}, '+', 2) AS INTEGER) END",
+                (
+                    f"CASE WHEN {c} LIKE '%+%' "
+                    f"THEN CAST(split_part({c}, '+', 2) AS INTEGER) END"
+                ),
             ),
         ]
     if tipo == DINHEIRO:
