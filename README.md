@@ -82,6 +82,7 @@ pipeline_brasileirao/
 ├── raw/                         # dados de origem (.csv.gz) e Legenda.txt
 ├── pipeline/
 │   ├── db.py                    # conexão e gravação, compartilhadas pelas etapas
+│   ├── log.py                   # logging das etapas: relatório no stdout, erro no stderr
 │   ├── ingestao.py              # etapa 1: CSV -> raw
 │   ├── transformacao.py         # etapa 2: raw -> refined
 │   └── marts.py                 # etapa 3: executa sql/marts/ -> marts
@@ -94,12 +95,12 @@ pipeline_brasileirao/
 ├── ui.py                        # abre o banco na interface web do DuckDB
 ├── .mcp.json                    # servidor MCP do DuckDB (somente leitura)
 ├── pyproject.toml               # dependências, pytest e coverage
-└── LICENSE                      # licença dos dados
+├── LICENSE                      # licença dos dados
+└── brasileirao.duckdb           # gerado pelo pipeline; versionado só para o deploy
 ```
 
-O arquivo `brasileirao.duckdb` é gerado pelo pipeline e fica na raiz. Ele é
-versionado porque o painel online só lê o que está no repositório: depois de
-rodar o pipeline, faça commit do banco atualizado.
+O `brasileirao.duckdb` não é fonte de nada: é a saída do pipeline. Veja
+[O banco versionado e o deploy](#o-banco-versionado-e-o-deploy).
 
 ## Como usar
 
@@ -119,8 +120,9 @@ uv run python -m pipeline.marts          # refined -> marts
 uv run streamlit run app.py
 ```
 
-Cada etapa imprime uma linha por tabela, com a contagem lida do banco, e
-encerra com erro se a etapa anterior não tiver rodado.
+Cada etapa registra, pelo `logging`, uma linha por tabela com a contagem lida
+do banco, e encerra com erro se a etapa anterior não tiver rodado. O
+relatório sai no stdout e as mensagens de erro no stderr.
 
 O painel abre na **Visão geral**, com três abas: Campeonato, Temporada e
 Jogadores. Pela barra lateral, escolha um dos 46 clubes para ver a página
@@ -158,6 +160,49 @@ nenhuma linha de Python.
 
 Rodar qualquer etapa duas vezes imprime exatamente a mesma coisa: cada
 tabela é recriada, nada acumula.
+
+## O banco versionado e o deploy
+
+O `brasileirao.duckdb` é **gerado**, nunca editado à mão. Ele sai inteiro
+dos três comandos do pipeline, a partir dos `raw/*.csv.gz` e dos
+`sql/marts/*.sql`. Os dois mais o código são a fonte da verdade; o banco é
+só o resultado.
+
+**Por que ele está no repositório.** Arquivo gerado normalmente fica fora do
+git, e o `.gitignore` ignora `*.duckdb`. A única exceção é este arquivo
+(`!brasileirao.duckdb`), por causa do painel online: o Streamlit Community
+Cloud só roda o `app.py` e lê o que está no repositório. Ele não roda o
+pipeline. Sem o banco no git, o painel publicado abriria vazio.
+
+**O deploy é automático.** O Streamlit Cloud acompanha o branch `main` e
+republica o painel sozinho a cada push. Não há passo manual de deploy: o que
+estiver no `main` é o que aparece em
+[pipelinebrasileirao.streamlit.app](https://pipelinebrasileirao.streamlit.app/).
+
+**Como regenerar e publicar.** Sempre que mudar um CSV de `raw/`, um `.sql`
+de `sql/marts/` ou uma regra do pipeline:
+
+```bash
+# 1. Feche o ui.py, se estiver aberto (ele segura o lock do banco)
+
+# 2. Regenere o banco inteiro, nesta ordem
+uv run python -m pipeline.ingestao
+uv run python -m pipeline.transformacao
+uv run python -m pipeline.marts
+
+# 3. Confira as contagens na tela (veja "O que esperar") e o painel local
+uv run streamlit run app.py
+
+# 4. Versione o banco junto com a mudança que o gerou
+git add brasileirao.duckdb sql/ pipeline/
+git commit -m "..."
+git push   # o painel online se atualiza sozinho
+```
+
+Na prática, ninguém precisa se preocupar com o banco: basta rodar os três
+comandos e commitar o resultado. Se o painel online mostrar um número
+diferente do local, o banco commitado ficou desatualizado. Rode o pipeline de
+novo e faça o commit.
 
 ## Regras
 
