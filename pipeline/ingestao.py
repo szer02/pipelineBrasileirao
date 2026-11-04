@@ -50,9 +50,12 @@ Execução:
 6. SAÍDA NA TELA
    Uma linha por tabela, com nome qualificado e contagem vinda do banco (não
    do DataFrame), milhar separado por ponto, e uma linha final com o total.
-   stdout reconfigurado para utf-8.
+   Saída pelo logging de pipeline/log.py, só com o texto da mensagem: o
+   relatório em INFO, no stdout; as mensagens de erro em ERROR, no stderr.
+   stdout e stderr reconfigurados para utf-8.
    Por quê: essa saída é o único instrumento de conferência desta etapa, e no
-   Prompt de Comando do Windows acento sai embaralhado por padrão.
+   Prompt de Comando do Windows acento sai embaralhado por padrão. O logging
+   separa erro de relatório, coisa que o print não fazia.
 
 7. ERRO
    Antes de abrir o banco, verifica se os quatro arquivos existem. Faltando
@@ -65,11 +68,15 @@ Este módulo não importa ui.py: a ingestão não sobe servidor, não abre
 navegador e não depende da extensão ui do DuckDB.
 """
 
+import logging
 import sys
 
 import pandas as pd
 
 from pipeline.db import PASTA_RAW, conectar, criar_schema, gravar
+from pipeline.log import configurar_log
+
+log = logging.getLogger("pipeline.ingestao")
 
 SCHEMA = "raw"
 
@@ -86,13 +93,13 @@ def _milhar(n: int) -> str:
 
 
 def main() -> None:
-    sys.stdout.reconfigure(encoding="utf-8")
+    configurar_log()
 
     faltando = [nome for nome in ARQUIVOS if not (PASTA_RAW / nome).is_file()]
     if faltando:
-        print(f"Arquivos não encontrados em {PASTA_RAW}:")
+        log.error("Arquivos não encontrados em %s:", PASTA_RAW)
         for nome in faltando:
-            print(f"  {nome}")
+            log.error("  %s", nome)
         sys.exit(1)
 
     con = conectar()
@@ -113,8 +120,8 @@ def main() -> None:
 
     largura = max(len(nome) for nome in contagens)
     for nome, n in contagens.items():
-        print(f"{nome:<{largura}}  {_milhar(n):>7}")
-    print(f"{'total':<{largura}}  {_milhar(sum(contagens.values())):>7}")
+        log.info("%s  %7s", nome.ljust(largura), _milhar(n))
+    log.info("%s  %7s", "total".ljust(largura), _milhar(sum(contagens.values())))
 
 
 if __name__ == "__main__":

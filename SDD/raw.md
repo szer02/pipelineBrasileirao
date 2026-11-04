@@ -121,6 +121,8 @@ SPEC DA INGESTÃO (segundo artefato)
    Essa saída é meu único instrumento de conferência nesta etapa.
    O stdout precisa ser reconfigurado para utf-8: rodo no Prompt de Comando
    do Windows, onde acento sai embaralhado por padrão.
+   (Atualizado por SDD/refatoracao.md: a saída é feita pelo logging de
+   pipeline/log.py, com o mesmo texto; erro vai para o stderr.)
 
 7. ERRO
    Antes de abrir o banco, verifique se os quatro arquivos existem.
