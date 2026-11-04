@@ -42,6 +42,9 @@ SPEC
      ✓ marts.gols_por_temporada        23 linhas
    Linha final com o número de marts e o total de linhas.
    stdout reconfigurado para utf-8.
+   (Atualizado por SDD/refatoracao.md: a saída é feita pelo logging de
+   pipeline/log.py, com o mesmo texto; erro vai para o stderr. main() só
+   encadeia uma função por etapa.)
 
 4. ERRO
    Antes de tudo: se faltar qualquer uma das quatro tabelas em refined

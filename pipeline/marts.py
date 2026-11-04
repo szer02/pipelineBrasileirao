@@ -24,10 +24,13 @@ Execução:
 3. SAÍDA NA TELA
    Uma linha por mart, com a contagem vinda do banco, milhar com ponto:
        ✓ marts.gols_por_temporada        23 linhas
-   Linha final com o número de marts e o total de linhas. stdout
-   reconfigurado para utf-8.
+   Linha final com o número de marts e o total de linhas.
+   Saída pelo logging de pipeline/log.py, só com o texto da mensagem: o
+   relatório em INFO, no stdout; as mensagens de erro (item 4) em ERROR, no
+   stderr. stdout e stderr reconfigurados para utf-8.
    Por quê: é o instrumento de conferência desta etapa; a contagem tem que
-   ser a do que foi gravado, não a do que se esperava gravar.
+   ser a do que foi gravado, não a do que se esperava gravar. O logging
+   separa erro de relatório, coisa que o print não fazia.
 
 4. ERRO
    Antes de tudo: faltando qualquer uma das quatro tabelas em refined
@@ -51,10 +54,17 @@ Execução:
    vazio), o schema marts volta a ser o da última execução que deu certo.
    Por quê: um schema pela metade quebra o painel sem avisar.
 
+5. ORGANIZAÇÃO
+   main() só encadeia as etapas, uma função para cada: conferir as tabelas
+   de refined, listar e validar os arquivos, executar os marts na
+   transação e relatar, nesta ordem.
+   Por quê: cada etapa lida, testada e alterada sem atravessar as outras.
+
 Convenção do DuckDB 2.0 neste projeto: todo resultado é consumido
 (.fetchall() ou .complete()) antes do próximo comando na mesma conexão.
 """
 
+import logging
 import re
 import sys
 from pathlib import Path
@@ -62,6 +72,9 @@ from pathlib import Path
 import duckdb
 
 from pipeline.db import conectar, criar_schema
+from pipeline.log import configurar_log
+
+log = logging.getLogger("pipeline.marts")
 
 ORIGEM = "refined"
 DESTINO = "marts"
@@ -83,91 +96,114 @@ def _sql(arquivo: Path) -> str:
     return texto.removesuffix(";")
 
 
+def _abortar(linhas: list[str]) -> None:
+    for linha in linhas:
+        log.error("%s", linha)
+    sys.exit(1)
+
+
+def _exigir_origem(con) -> None:
+    existentes = {
+        nome
+        for (nome,) in con.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
+            [ORIGEM],
+        ).fetchall()
+    }
+    faltando = [t for t in TABELAS_ORIGEM if t not in existentes]
+    if faltando:
+        _abortar(
+            [f"Tabelas não encontradas no schema {ORIGEM}:"]
+            + [f"  {ORIGEM}.{t}" for t in faltando]
+            + ["Rode antes: uv run python -m pipeline.transformacao"]
+        )
+
+
+def _listar_marts() -> list[tuple[Path, str]]:
+    """Arquivos de sql/marts/ em ordem, cada um com o nome da tabela que gera."""
+    arquivos = sorted(PASTA_MARTS.glob("*.sql"), key=lambda p: p.name)
+    if not arquivos:
+        _abortar([f"Nenhum arquivo .sql em {PASTA_MARTS}; nada foi executado."])
+
+    sem_prefixo = []
+    por_nome: dict[str, list[Path]] = {}
+    for arquivo in arquivos:
+        casou = PREFIXO.fullmatch(arquivo.stem)
+        if casou is None:
+            sem_prefixo.append(arquivo)
+        else:
+            # O DuckDB não diferencia maiúsculas em nome de tabela:
+            # 01_Gols e 02_gols seriam a mesma tabela.
+            por_nome.setdefault(casou.group(1).lower(), []).append(arquivo)
+    repetidos = {nome: lista for nome, lista in por_nome.items() if len(lista) > 1}
+    if sem_prefixo or repetidos:
+        linhas = []
+        if sem_prefixo:
+            linhas.append("Arquivos sem o prefixo NN_:")
+            linhas += [f"  {arquivo.name}" for arquivo in sem_prefixo]
+        if repetidos:
+            linhas.append("Arquivos que dão o mesmo nome de tabela:")
+            linhas += [
+                f"  {DESTINO}.{nome}: {', '.join(a.name for a in lista)}"
+                for nome, lista in repetidos.items()
+            ]
+        _abortar(linhas + ["Nenhum SQL foi executado."])
+
+    return [(a, PREFIXO.fullmatch(a.stem).group(1)) for a in arquivos]
+
+
+def _executar(con, marts: list[tuple[Path, str]]) -> list[tuple[str, int]]:
+    """Recria o schema marts numa transação e devolve (tabela, linhas) de cada mart."""
+    desfeito = f"O schema {DESTINO} ficou como estava antes desta execução."
+    contagens = []
+    con.execute("BEGIN TRANSACTION").complete()
+    try:
+        con.execute(f'DROP SCHEMA IF EXISTS "{DESTINO}" CASCADE').complete()
+        criar_schema(con, DESTINO)
+        for arquivo, nome in marts:
+            destino = f'"{DESTINO}"."{nome}"'
+            try:
+                con.execute(f"CREATE TABLE {destino} AS {_sql(arquivo)}").complete()
+            except duckdb.Error as erro:
+                _abortar([f"Falhou: {arquivo.name}", str(erro), desfeito])
+            [(n,)] = con.execute(f"SELECT count(*) FROM {destino}").fetchall()
+            if n == 0:
+                _abortar(
+                    [
+                        f"Mart vazio: {arquivo.name} -> {DESTINO}.{nome} com 0 linhas",
+                        desfeito,
+                    ]
+                )
+            contagens.append((f"{DESTINO}.{nome}", n))
+        con.execute("COMMIT").complete()
+    except BaseException:
+        con.execute("ROLLBACK").complete()
+        raise
+    return contagens
+
+
+def _relatar(contagens: list[tuple[str, int]]) -> None:
+    largura_nome = max(len(nome) for nome, _ in contagens)
+    largura_n = max(len(_milhar(n)) for _, n in contagens)
+    for nome, n in contagens:
+        log.info(
+            "✓ %s  %s linhas", nome.ljust(largura_nome), _milhar(n).rjust(largura_n)
+        )
+    total = sum(n for _, n in contagens)
+    log.info("total %s marts, %s linhas", len(contagens), _milhar(total))
+
+
 def main() -> None:
-    sys.stdout.reconfigure(encoding="utf-8")
+    configurar_log()
 
     con = conectar()
     try:
-        existentes = {
-            nome
-            for (nome,) in con.execute(
-                "SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
-                [ORIGEM],
-            ).fetchall()
-        }
-        faltando = [t for t in TABELAS_ORIGEM if t not in existentes]
-        if faltando:
-            print(f"Tabelas não encontradas no schema {ORIGEM}:")
-            for t in faltando:
-                print(f"  {ORIGEM}.{t}")
-            print("Rode antes: uv run python -m pipeline.transformacao")
-            sys.exit(1)
-
-        arquivos = sorted(PASTA_MARTS.glob("*.sql"), key=lambda p: p.name)
-        if not arquivos:
-            print(f"Nenhum arquivo .sql em {PASTA_MARTS}; nada foi executado.")
-            sys.exit(1)
-
-        sem_prefixo = []
-        por_nome: dict[str, list[Path]] = {}
-        for arquivo in arquivos:
-            casou = PREFIXO.fullmatch(arquivo.stem)
-            if casou is None:
-                sem_prefixo.append(arquivo)
-            else:
-                # O DuckDB não diferencia maiúsculas em nome de tabela:
-                # 01_Gols e 02_gols seriam a mesma tabela.
-                por_nome.setdefault(casou.group(1).lower(), []).append(arquivo)
-        repetidos = {nome: lista for nome, lista in por_nome.items() if len(lista) > 1}
-        if sem_prefixo or repetidos:
-            if sem_prefixo:
-                print("Arquivos sem o prefixo NN_:")
-                for arquivo in sem_prefixo:
-                    print(f"  {arquivo.name}")
-            if repetidos:
-                print("Arquivos que dão o mesmo nome de tabela:")
-                for nome, lista in repetidos.items():
-                    print(f"  {DESTINO}.{nome}: {', '.join(a.name for a in lista)}")
-            print("Nenhum SQL foi executado.")
-            sys.exit(1)
-
-        marts = [(a, PREFIXO.fullmatch(a.stem).group(1)) for a in arquivos]
-
-        contagens = []
-        con.execute("BEGIN TRANSACTION").complete()
-        try:
-            con.execute(f'DROP SCHEMA IF EXISTS "{DESTINO}" CASCADE').complete()
-            criar_schema(con, DESTINO)
-            for arquivo, nome in marts:
-                destino = f'"{DESTINO}"."{nome}"'
-                try:
-                    con.execute(f"CREATE TABLE {destino} AS {_sql(arquivo)}").complete()
-                except duckdb.Error as erro:
-                    print(f"Falhou: {arquivo.name}")
-                    print(erro)
-                    print(f"O schema {DESTINO} ficou como estava antes desta execução.")
-                    sys.exit(1)
-                [(n,)] = con.execute(f"SELECT count(*) FROM {destino}").fetchall()
-                if n == 0:
-                    print(
-                        f"Mart vazio: {arquivo.name} -> {DESTINO}.{nome} com 0 linhas"
-                    )
-                    print(f"O schema {DESTINO} ficou como estava antes desta execução.")
-                    sys.exit(1)
-                contagens.append((f"{DESTINO}.{nome}", n))
-            con.execute("COMMIT").complete()
-        except BaseException:
-            con.execute("ROLLBACK").complete()
-            raise
-
-        # Impresso só depois do COMMIT: um ✓ antes dele poderia ser desfeito
+        _exigir_origem(con)
+        marts = _listar_marts()
+        contagens = _executar(con, marts)
+        # Relatado só depois do COMMIT: um ✓ antes dele poderia ser desfeito
         # pelo ROLLBACK de um mart seguinte.
-        largura_nome = max(len(nome) for nome, _ in contagens)
-        largura_n = max(len(_milhar(n)) for _, n in contagens)
-        for nome, n in contagens:
-            print(f"✓ {nome:<{largura_nome}}  {_milhar(n):>{largura_n}} linhas")
-        total = sum(n for _, n in contagens)
-        print(f"total {len(contagens)} marts, {_milhar(total)} linhas")
+        _relatar(contagens)
     finally:
         con.close()
 
