@@ -169,6 +169,9 @@ SPEC
    Em gols e cartoes, "(N repetidas mantidas)" no lugar de duplicatas.
    As contagens vêm do banco, milhar separado por ponto. Linha final com o
    total. stdout reconfigurado para utf-8.
+   (Atualizado por SDD/refatoracao.md: a saída é feita pelo logging de
+   pipeline/log.py, com o mesmo texto; erro vai para o stderr. main() só
+   encadeia uma função por etapa.)
 
 REEXECUÇÃO E GRAVAÇÃO
    CREATE OR REPLACE TABLE, nunca acrescenta. Rodar dez vezes = rodar uma.

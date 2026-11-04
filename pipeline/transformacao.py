@@ -105,9 +105,13 @@ Execução:
    mantido). Em estatisticas, uma linha a mais com os nulos vindos de
    'None'. Linha final:
        total 59.268 -> 59.268 linhas (0 duplicatas removidas)
-   Contagens lidas do banco, milhar separado por ponto, stdout em utf-8.
+   Contagens lidas do banco, milhar separado por ponto.
+   Saída pelo logging de pipeline/log.py, só com o texto da mensagem: o
+   relatório em INFO, no stdout; as mensagens de erro (itens 4, 5 e 9) em
+   ERROR, no stderr. stdout e stderr em utf-8.
    Por quê: é o instrumento de conferência desta etapa; "nulos depois =
-   nulos antes" tem que dar para ver sem abrir o banco.
+   nulos antes" tem que dar para ver sem abrir o banco. O logging separa
+   erro de relatório, coisa que o print não fazia.
 
 8. REEXECUÇÃO E GRAVAÇÃO
    CREATE OR REPLACE TABLE, nunca acrescenta: rodar dez vezes = rodar uma.
@@ -123,16 +127,26 @@ Execução:
    Por quê: transformar três de quatro tabelas deixa um refined que parece
    completo e não é.
 
+10. ORGANIZAÇÃO
+   main() só encadeia as etapas, uma função para cada: conferir as tabelas
+   de entrada (9), validar formato (4), validar conversão (4), validar
+   chaves (5), gravar (8) e relatar (7), nesta ordem.
+   Por quê: cada etapa lida, testada e alterada sem atravessar as outras.
+
 Convenção do DuckDB 2.0 neste projeto: todo resultado é consumido
 (.fetchall() ou .complete()) antes do próximo comando na mesma conexão.
 """
 
+import logging
 import sys
 from itertools import groupby
 
 import duckdb
 
 from pipeline.db import conectar, criar_schema
+from pipeline.log import configurar_log
+
+log = logging.getLogger("pipeline.transformacao")
 
 ORIGEM = "raw"
 DESTINO = "refined"
@@ -294,7 +308,9 @@ def _falha_de_conversao(con, tabela: str, origem: str, expr: str) -> str | None:
     ).fetchall()
     for (valor,) in valores:
         try:
-            con.execute(f"SELECT {expr} FROM (SELECT ?::VARCHAR AS {c})", [valor]).fetchall()
+            con.execute(
+                f"SELECT {expr} FROM (SELECT ?::VARCHAR AS {c})", [valor]
+            ).fetchall()
         except duckdb.Error:
             return valor
     raise original
@@ -319,7 +335,9 @@ def _conflitos(con, tabela: str) -> list[str]:
     ).fetchall()
     posicoes = [colunas.index(c) for c in chave]
     saida = []
-    for valor_chave, grupo in groupby(linhas, key=lambda r: tuple(r[i] for i in posicoes)):
+    for valor_chave, grupo in groupby(
+        linhas, key=lambda r: tuple(r[i] for i in posicoes)
+    ):
         saida.append(f"  {ORIGEM}.{tabela} {dict(zip(chave, valor_chave))}:")
         saida.extend(f"    {dict(zip(colunas, linha))}" for linha in grupo)
     return saida
@@ -330,124 +348,157 @@ def _contar(con, sql: str) -> int:
     return n
 
 
+def _abortar(titulo: str, linhas: list[str]) -> None:
+    log.error("%s", titulo)
+    for linha in linhas:
+        log.error("%s", linha)
+    sys.exit(1)
+
+
+def _exigir_origem(con) -> None:
+    existentes = {
+        nome
+        for (nome,) in con.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
+            [ORIGEM],
+        ).fetchall()
+    }
+    faltando = [t for t in MAPA if t not in existentes]
+    if faltando:
+        _abortar(
+            f"Tabelas não encontradas no schema {ORIGEM}:",
+            [f"  {ORIGEM}.{t}" for t in faltando]
+            + ["Rode antes: uv run python -m pipeline.ingestao"],
+        )
+
+
+def _validar_formato(con) -> None:
+    falhas = []
+    for tabela, colunas in MAPA.items():
+        for origem, _, tipo in colunas:
+            if tipo == TEXTO:
+                continue
+            valor = _fora_do_formato(con, tabela, origem, tipo)
+            if valor is not None:
+                falhas.append(f"  {ORIGEM}.{tabela}.{origem} ({tipo}): {valor!r}")
+    if falhas:
+        _abortar("Valor fora do formato esperado; nada foi gravado:", falhas)
+
+
+def _validar_conversao(con) -> None:
+    falhas = []
+    for tabela, colunas in MAPA.items():
+        for origem, destino, tipo in colunas:
+            if tipo == TEXTO:
+                continue
+            for nome, expr in _expressoes(origem, destino, tipo):
+                valor = _falha_de_conversao(con, tabela, origem, expr)
+                if valor is not None:
+                    falhas.append(f"  {ORIGEM}.{tabela}.{origem} -> {nome}: {valor!r}")
+    if falhas:
+        _abortar("Valor que não converteu; nada foi gravado:", falhas)
+
+
+def _validar_chaves(con) -> None:
+    conflitos = [linha for tabela in CHAVES for linha in _conflitos(con, tabela)]
+    if conflitos:
+        _abortar("Chave repetida com conteúdo diferente; nada foi gravado:", conflitos)
+
+
+def _gravar_refined(con) -> None:
+    con.execute("BEGIN TRANSACTION").complete()
+    try:
+        criar_schema(con, DESTINO)
+        for tabela in MAPA:
+            distinct = "DISTINCT " if tabela in CHAVES else ""
+            con.execute(
+                f"CREATE OR REPLACE TABLE {DESTINO}.{tabela} AS "
+                f"SELECT {distinct}{_selecao(tabela)} FROM {ORIGEM}.{tabela}"
+            ).complete()
+        con.execute("COMMIT").complete()
+    except BaseException:
+        con.execute("ROLLBACK").complete()
+        raise
+
+
+def _nulos(con, tabela: str, colunas: list) -> tuple[list[str], dict[str, int]]:
+    """Nulos mantidos de uma tabela de refined, já sem os vindos de 'None', e estes à parte."""
+    # acrescimo fica de fora: seu nulo nasce da divisão de minuto.
+    nomes = [destino for _, destino, _ in colunas]
+    nulos = con.execute(
+        "SELECT "
+        + ", ".join(f"count(*) - count({_q(n)})" for n in nomes)
+        + f" FROM {DESTINO}.{tabela}"
+    ).fetchall()[0]
+    percentuais = [(o, d) for o, d, t in colunas if t == PERCENTUAL]
+    vindos_de_none = {}
+    if percentuais:
+        contagens = con.execute(
+            "SELECT "
+            + ", ".join(
+                f"count(*) FILTER (WHERE {_q(o)} = 'None')" for o, _ in percentuais
+            )
+            + f" FROM {ORIGEM}.{tabela}"
+        ).fetchall()[0]
+        vindos_de_none = {d: n for (_, d), n in zip(percentuais, contagens)}
+
+    mantidos = [
+        f"{nome} {_milhar(n - vindos_de_none.get(nome, 0))}"
+        for nome, n in zip(nomes, nulos)
+        if n - vindos_de_none.get(nome, 0) > 0
+    ]
+    return mantidos, vindos_de_none
+
+
+def _relatar(con, entrada: dict[str, int], repetidas: dict[str, int]) -> None:
+    total_entrada = total_saida = total_removidas = 0
+    for tabela, colunas in MAPA.items():
+        saida = _contar(con, f"SELECT count(*) FROM {DESTINO}.{tabela}")
+        if tabela in CHAVES:
+            sufixo = f"{_milhar(repetidas[tabela])} duplicatas"
+            total_removidas += repetidas[tabela]
+        else:
+            sufixo = f"{_milhar(repetidas[tabela])} repetidas mantidas"
+        log.info(
+            "%s.%s %s -> %s linhas (%s)",
+            DESTINO,
+            tabela,
+            _milhar(entrada[tabela]),
+            _milhar(saida),
+            sufixo,
+        )
+        total_entrada += entrada[tabela]
+        total_saida += saida
+
+        mantidos, vindos_de_none = _nulos(con, tabela, colunas)
+        log.info("    nulos mantidos: %s", ", ".join(mantidos) or "nenhum")
+        if vindos_de_none:
+            log.info(
+                "    'None' -> NULL: %s",
+                ", ".join(f"{d} {_milhar(n)}" for d, n in vindos_de_none.items()),
+            )
+
+    log.info(
+        "total %s -> %s linhas (%s duplicatas removidas)",
+        _milhar(total_entrada),
+        _milhar(total_saida),
+        _milhar(total_removidas),
+    )
+
+
 def main() -> None:
-    sys.stdout.reconfigure(encoding="utf-8")
+    configurar_log()
 
     con = conectar()
     try:
-        existentes = {
-            nome
-            for (nome,) in con.execute(
-                "SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
-                [ORIGEM],
-            ).fetchall()
-        }
-        faltando = [t for t in MAPA if t not in existentes]
-        if faltando:
-            print(f"Tabelas não encontradas no schema {ORIGEM}:")
-            for t in faltando:
-                print(f"  {ORIGEM}.{t}")
-            print("Rode antes: uv run python -m pipeline.ingestao")
-            sys.exit(1)
-
-        falhas = []
-        for tabela, colunas in MAPA.items():
-            for origem, destino, tipo in colunas:
-                if tipo == TEXTO:
-                    continue
-                valor = _fora_do_formato(con, tabela, origem, tipo)
-                if valor is not None:
-                    falhas.append(f"  {ORIGEM}.{tabela}.{origem} ({tipo}): {valor!r}")
-        if falhas:
-            print("Valor fora do formato esperado; nada foi gravado:")
-            print("\n".join(falhas))
-            sys.exit(1)
-
-        falhas = []
-        for tabela, colunas in MAPA.items():
-            for origem, destino, tipo in colunas:
-                if tipo == TEXTO:
-                    continue
-                for nome, expr in _expressoes(origem, destino, tipo):
-                    valor = _falha_de_conversao(con, tabela, origem, expr)
-                    if valor is not None:
-                        falhas.append(f"  {ORIGEM}.{tabela}.{origem} -> {nome}: {valor!r}")
-        if falhas:
-            print("Valor que não converteu; nada foi gravado:")
-            print("\n".join(falhas))
-            sys.exit(1)
-
-        conflitos = [linha for tabela in CHAVES for linha in _conflitos(con, tabela)]
-        if conflitos:
-            print("Chave repetida com conteúdo diferente; nada foi gravado:")
-            print("\n".join(conflitos))
-            sys.exit(1)
-
+        _exigir_origem(con)
+        _validar_formato(con)
+        _validar_conversao(con)
+        _validar_chaves(con)
         entrada = {t: _contar(con, f"SELECT count(*) FROM {ORIGEM}.{t}") for t in MAPA}
         repetidas = {t: _duplicatas(con, t) for t in MAPA}
-
-        con.execute("BEGIN TRANSACTION").complete()
-        try:
-            criar_schema(con, DESTINO)
-            for tabela in MAPA:
-                distinct = "DISTINCT " if tabela in CHAVES else ""
-                con.execute(
-                    f"CREATE OR REPLACE TABLE {DESTINO}.{tabela} AS "
-                    f"SELECT {distinct}{_selecao(tabela)} FROM {ORIGEM}.{tabela}"
-                ).complete()
-            con.execute("COMMIT").complete()
-        except BaseException:
-            con.execute("ROLLBACK").complete()
-            raise
-
-        total_entrada = total_saida = total_removidas = 0
-        for tabela, colunas in MAPA.items():
-            saida = _contar(con, f"SELECT count(*) FROM {DESTINO}.{tabela}")
-            if tabela in CHAVES:
-                sufixo = f"{_milhar(repetidas[tabela])} duplicatas"
-                total_removidas += repetidas[tabela]
-            else:
-                sufixo = f"{_milhar(repetidas[tabela])} repetidas mantidas"
-            print(
-                f"{DESTINO}.{tabela} {_milhar(entrada[tabela])} -> "
-                f"{_milhar(saida)} linhas ({sufixo})"
-            )
-            total_entrada += entrada[tabela]
-            total_saida += saida
-
-            # acrescimo fica de fora: seu nulo nasce da divisão de minuto.
-            nomes = [destino for _, destino, _ in colunas]
-            nulos = con.execute(
-                "SELECT "
-                + ", ".join(f"count(*) - count({_q(n)})" for n in nomes)
-                + f" FROM {DESTINO}.{tabela}"
-            ).fetchall()[0]
-            percentuais = [(o, d) for o, d, t in colunas if t == PERCENTUAL]
-            vindos_de_none = {}
-            if percentuais:
-                contagens = con.execute(
-                    "SELECT "
-                    + ", ".join(f"count(*) FILTER (WHERE {_q(o)} = 'None')" for o, _ in percentuais)
-                    + f" FROM {ORIGEM}.{tabela}"
-                ).fetchall()[0]
-                vindos_de_none = {d: n for (_, d), n in zip(percentuais, contagens)}
-
-            mantidos = [
-                f"{nome} {_milhar(n - vindos_de_none.get(nome, 0))}"
-                for nome, n in zip(nomes, nulos)
-                if n - vindos_de_none.get(nome, 0) > 0
-            ]
-            print(f"    nulos mantidos: {', '.join(mantidos) or 'nenhum'}")
-            if vindos_de_none:
-                print(
-                    "    'None' -> NULL: "
-                    + ", ".join(f"{d} {_milhar(n)}" for d, n in vindos_de_none.items())
-                )
-
-        print(
-            f"total {_milhar(total_entrada)} -> {_milhar(total_saida)} linhas "
-            f"({_milhar(total_removidas)} duplicatas removidas)"
-        )
+        _gravar_refined(con)
+        _relatar(con, entrada, repetidas)
     finally:
         con.close()
 
